@@ -96,18 +96,20 @@ st.markdown(
         display: none;
     }}
 
-    /* 
-       Correção sidebar:
-       - Esconde apenas o botão nativo de FECHAR a sidebar quando ela está aberta.
-       - NÃO esconde o botão nativo de ABRIR, para recuperar caso o navegador tenha salvo a sidebar recolhida.
+    /*
+       Sidebar nativa do Streamlit:
+       NÃO esconda os botões nativos de abrir/fechar.
+       No Streamlit Cloud, o navegador pode memorizar a sidebar recolhida.
+       Se o botão nativo for escondido, a barra lateral fica impossível de recuperar.
     */
-    [data-testid="stSidebarCollapseButton"],
-    button[data-testid="stSidebarCollapseButton"],
-    button[aria-label="Close sidebar"],
-    button[title="Close sidebar"] {{
-        display: none !important;
-        visibility: hidden !important;
-        pointer-events: none !important;
+    [data-testid="collapsedControl"],
+    button[data-testid="collapsedControl"],
+    [data-testid="stSidebarCollapsedControl"],
+    button[data-testid="stSidebarCollapsedControl"] {{
+        display: flex !important;
+        visibility: visible !important;
+        pointer-events: auto !important;
+        z-index: 999999 !important;
     }}
 
     .block-container {{
