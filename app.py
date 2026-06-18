@@ -1,4 +1,5 @@
 
+
 import base64
 from datetime import date
 from pathlib import Path
@@ -93,6 +94,17 @@ st.markdown(
     div[data-testid="stToolbar"],
     header[data-testid="stHeader"] {{
         display: none;
+    }}
+
+    /* Impede que a barra lateral nativa do Streamlit seja recolhida/suma */
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="collapsedControl"],
+    button[data-testid="stSidebarCollapseButton"],
+    button[aria-label="Close sidebar"],
+    button[aria-label="Open sidebar"] {{
+        display: none !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
     }}
 
     .block-container {{
