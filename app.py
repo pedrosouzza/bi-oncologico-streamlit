@@ -96,12 +96,15 @@ st.markdown(
         display: none;
     }}
 
-    /* Impede que a barra lateral nativa do Streamlit seja recolhida/suma */
+    /* 
+       Correção sidebar:
+       - Esconde apenas o botão nativo de FECHAR a sidebar quando ela está aberta.
+       - NÃO esconde o botão nativo de ABRIR, para recuperar caso o navegador tenha salvo a sidebar recolhida.
+    */
     [data-testid="stSidebarCollapseButton"],
-    [data-testid="collapsedControl"],
     button[data-testid="stSidebarCollapseButton"],
     button[aria-label="Close sidebar"],
-    button[aria-label="Open sidebar"] {{
+    button[title="Close sidebar"] {{
         display: none !important;
         visibility: hidden !important;
         pointer-events: none !important;
