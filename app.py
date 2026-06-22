@@ -1,6 +1,4 @@
-
-
-
+%%writefile app.py
 
 import base64
 import re
@@ -2323,13 +2321,13 @@ def page_busca():
     radiologia_view = radiologia_view.drop(columns=["ESPECIALIDADE"], errors="ignore")
     laboratorio_view = laboratorio_view.drop(columns=["ESPECIALIDADE"], errors="ignore")
 
+    st.markdown("<div class='section-title'>Pacientes Não Navegados</div>", unsafe_allow_html=True)
+    table_html(nao_nav_filtered, "ANALÍTICO PACIENTES NÃO NAVEGADOS", scroll=True)
+
     table_html(patologia_view, "PACIENTES IDENTIFICADOS - PATOLOGIA", scroll=True)
     table_html(radiologia_view, "PACIENTES IDENTIFICADOS - RADIOLOGIA", scroll=True)
     table_html(laboratorio_view, "PACIENTES IDENTIFICADOS - LABORATÓRIO", scroll=True)
     table_html(naveg_df, "ANALÍTICO PACIENTES NAVEGADOS", scroll=True)
-
-    st.markdown("<div class='section-title'>Pacientes Não Navegados</div>", unsafe_allow_html=True)
-    table_html(nao_nav_filtered, "ANALÍTICO PACIENTES NÃO NAVEGADOS", scroll=True)
 
 
 def page_acomp():
