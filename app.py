@@ -1,5 +1,3 @@
-%%writefile app.py
-
 import base64
 import re
 from datetime import date
