@@ -1,6 +1,9 @@
 
 
+
+
 import base64
+import re
 from datetime import date
 from pathlib import Path
 
@@ -1103,6 +1106,10 @@ patologia_df, radiologia_df, laboratorio_df, naveg_df, nao_nav_df, receita_med_d
 # ENRIQUECIMENTO MOCK - STATUS, SQUAD MÉDICA E FINANCEIRO
 # ============================================================
 
+STATUS_IDENTIFICADO = "Identificado e não 1ª Consulta"
+STATUS_CONSULTA = "1ª Consulta e não 1º Tratamento"
+STATUS_ORDER = [STATUS_IDENTIFICADO, STATUS_CONSULTA]
+
 squad_acompanhamento = [
     "Dra. Beatriz Nogueira",
     "Dr. Lucas Barbosa",
@@ -1118,12 +1125,20 @@ squad_acompanhamento = [
     "Dr. Marcos Lima",
 ]
 
+squad_sem_vazio = [m for m in squad_acompanhamento if m]
+
 def add_status_and_med_resp(df: pd.DataFrame, offset: int = 0) -> pd.DataFrame:
     df = df.copy()
 
-    status_values = ["Identificado", "1ª Consulta"]
-    statuses = [status_values[(i + offset) % 2] for i in range(len(df))]
-    med_resp = [squad_acompanhamento[(i + offset) % len(squad_acompanhamento)] for i in range(len(df))]
+    statuses = [STATUS_ORDER[(i + offset) % 2] for i in range(len(df))]
+    med_resp = []
+    for i, status in enumerate(statuses):
+        candidate = squad_acompanhamento[(i + offset) % len(squad_acompanhamento)]
+        # Regra de negócio do mock: pacientes sem médico responsável devem estar apenas no status
+        # "Identificado e não 1ª Consulta".
+        if status == STATUS_CONSULTA and candidate == "":
+            candidate = squad_sem_vazio[(i + offset) % len(squad_sem_vazio)]
+        med_resp.append(candidate)
 
     if "STATUS" not in df.columns:
         pos = df.columns.get_loc("PACIENTE") + 1 if "PACIENTE" in df.columns else len(df.columns)
@@ -1147,37 +1162,106 @@ radiologia_df = add_status_and_med_resp(radiologia_df, offset=1)
 laboratorio_df = add_status_and_med_resp(laboratorio_df, offset=2)
 
 # Ajustes financeiros no analítico de pacientes navegados.
+# Novas colunas financeiras solicitadas:
+# TOTAL - PRODUZIDO, TOTAL - ENVIADO, TOTAL - PENDENTE DE ENVIO,
+# TOTAL - RECEBIDO, TOTAL - VALOR A VENCER e TOTAL - VENCIDO.
 if "RECEITA" in naveg_df.columns:
-    naveg_df = naveg_df.rename(columns={"RECEITA": "RECEITA - PRODUZIDA"})
+    naveg_df = naveg_df.rename(columns={"RECEITA": "TOTAL - PRODUZIDO"})
 
-receita_enviada = [
+# Remove nomes financeiros antigos, caso existam em alguma versão anterior.
+naveg_df = naveg_df.drop(
+    columns=["RECEITA - PRODUZIDA", "RECEITA - ENVIADA", "RECEITA - RECEBIDA", "TOTAL GLOSADO"],
+    errors="ignore",
+)
+
+total_enviado = [
     0, 11200, 8730, None, 307.14, 15000, 0, 425.11, 22000, None,
     18500, 21000, 0, 12500, 17650, 24000, None, 6400, 15400, 11000
 ]
-receita_recebida = [
+total_recebido = [
     0, 9800, None, None, 0, 13750, 8500, None, 20200, None,
     17000, 19800, None, 10900, 16000, 22000, None, 5800, None, 9800
 ]
-total_glosado = [
-    None, 1400, None, None, 307.14, 1250, 1370, None, 1800, None,
-    1500, 1200, None, 1600, 1650, 2000, None, 600, None, 1200
+total_vencido = [
+    None, 850, None, None, 120.00, 760, 420, None, 950, None,
+    620, 530, None, 870, 740, 1100, None, 260, None, 390
 ]
 
-for col, values in [
-    ("RECEITA - ENVIADA", receita_enviada),
-    ("RECEITA - RECEBIDA", receita_recebida),
-    ("TOTAL GLOSADO", total_glosado),
-]:
+produzido_num = pd.to_numeric(naveg_df["TOTAL - PRODUZIDO"], errors="coerce").fillna(0)
+
+enviado_series = pd.Series(total_enviado[:len(naveg_df)], dtype="float")
+recebido_series = pd.Series(total_recebido[:len(naveg_df)], dtype="float")
+vencido_series = pd.Series(total_vencido[:len(naveg_df)], dtype="float")
+
+pendente_envio_series = produzido_num.reset_index(drop=True) - enviado_series.fillna(0)
+pendente_envio_series = pendente_envio_series.where(pendente_envio_series > 0, None)
+
+valor_a_vencer_series = enviado_series.fillna(0) - recebido_series.fillna(0) - vencido_series.fillna(0)
+valor_a_vencer_series = valor_a_vencer_series.where(valor_a_vencer_series > 0, None)
+
+finance_cols = [
+    ("TOTAL - ENVIADO", total_enviado),
+    ("TOTAL - PENDENTE DE ENVIO", pendente_envio_series.tolist()),
+    ("TOTAL - RECEBIDO", total_recebido),
+    ("TOTAL - VALOR A VENCER", valor_a_vencer_series.tolist()),
+    ("TOTAL - VENCIDO", total_vencido),
+]
+
+for col, values in finance_cols:
     if col not in naveg_df.columns:
-        pos = naveg_df.columns.get_loc("RECEITA - PRODUZIDA") + 1 if "RECEITA - PRODUZIDA" in naveg_df.columns else len(naveg_df.columns)
-        # Mantém a ordem: PRODUZIDA, ENVIADA, RECEBIDA, GLOSADO
-        if col == "RECEITA - RECEBIDA" and "RECEITA - ENVIADA" in naveg_df.columns:
-            pos = naveg_df.columns.get_loc("RECEITA - ENVIADA") + 1
-        if col == "TOTAL GLOSADO" and "RECEITA - RECEBIDA" in naveg_df.columns:
-            pos = naveg_df.columns.get_loc("RECEITA - RECEBIDA") + 1
+        pos = naveg_df.columns.get_loc("TOTAL - PRODUZIDO") + 1
+        if col == "TOTAL - PENDENTE DE ENVIO" and "TOTAL - ENVIADO" in naveg_df.columns:
+            pos = naveg_df.columns.get_loc("TOTAL - ENVIADO") + 1
+        if col == "TOTAL - RECEBIDO" and "TOTAL - PENDENTE DE ENVIO" in naveg_df.columns:
+            pos = naveg_df.columns.get_loc("TOTAL - PENDENTE DE ENVIO") + 1
+        if col == "TOTAL - VALOR A VENCER" and "TOTAL - RECEBIDO" in naveg_df.columns:
+            pos = naveg_df.columns.get_loc("TOTAL - RECEBIDO") + 1
+        if col == "TOTAL - VENCIDO" and "TOTAL - VALOR A VENCER" in naveg_df.columns:
+            pos = naveg_df.columns.get_loc("TOTAL - VALOR A VENCER") + 1
         naveg_df.insert(pos, col, values[:len(naveg_df)])
     else:
         naveg_df[col] = values[:len(naveg_df)]
+
+# Hospital nas tabelas da aba Busca de Pacientes
+def add_hospital_column(df: pd.DataFrame, offset: int = 0) -> pd.DataFrame:
+    df = df.copy()
+    hospitais = ["HA", "HFSB"]
+    values = [hospitais[(i + offset) % 2] for i in range(len(df))]
+    if "HOSPITAL" not in df.columns:
+        pos = df.columns.get_loc("DIAS DESDE A IDENTIFICAÇÃO") + 1 if "DIAS DESDE A IDENTIFICAÇÃO" in df.columns else 1
+        df.insert(pos, "HOSPITAL", values)
+    else:
+        df["HOSPITAL"] = values
+    return df
+
+patologia_df = add_hospital_column(patologia_df, offset=0)
+radiologia_df = add_hospital_column(radiologia_df, offset=1)
+laboratorio_df = add_hospital_column(laboratorio_df, offset=0)
+
+# Médicos responsáveis também nos analíticos de navegação/não navegação.
+med_resp_naveg = [squad_sem_vazio[i % len(squad_sem_vazio)] for i in range(len(naveg_df))]
+med_resp_nao_nav = [
+    "Dra. Beatriz Nogueira", "Dr. Lucas Barbosa", "Dra. Renata Moura", "Dr. Gustavo Pereira",
+    "Dra. Marina Albuquerque", "Dr. Henrique Tavares", "Dra. Fernanda Rocha", "Dr. Felipe Andrade",
+    "Dra. Juliana Costa", "Dr. Marcos Lima", "Dra. Paula Ferreira", "Dr. Ricardo Almeida"
+]
+
+if "MÉD. RESP. ACOMP." not in naveg_df.columns:
+    pos = naveg_df.columns.get_loc("MÉD. SOLICITANTE") + 1 if "MÉD. SOLICITANTE" in naveg_df.columns else len(naveg_df.columns)
+    naveg_df.insert(pos, "MÉD. RESP. ACOMP.", med_resp_naveg[:len(naveg_df)])
+else:
+    naveg_df["MÉD. RESP. ACOMP."] = med_resp_naveg[:len(naveg_df)]
+
+if "MÉD. RESP. ACOMP." not in nao_nav_df.columns:
+    pos = nao_nav_df.columns.get_loc("MÉD. SOLICITANTE") + 1 if "MÉD. SOLICITANTE" in nao_nav_df.columns else len(nao_nav_df.columns)
+    nao_nav_df.insert(pos, "MÉD. RESP. ACOMP.", med_resp_nao_nav[:len(nao_nav_df)])
+else:
+    nao_nav_df["MÉD. RESP. ACOMP."] = med_resp_nao_nav[:len(nao_nav_df)]
+
+# Troca de motivo para algo mais aderente à navegação oncológica.
+nao_nav_df["MOTIVO"] = nao_nav_df["MOTIVO"].replace({
+    "Dados cadastrais incompletos no atendimento": "Sem elegibilidade operacional para navegação"
+})
 
 def money_card(v: float) -> str:
     if v >= 1_000_000:
@@ -1209,6 +1293,165 @@ if "busca_status_filter" not in st.session_state:
 if "busca_med_resp_filter" not in st.session_state:
     st.session_state.busca_med_resp_filter = None
 
+if "nao_nav_motivo_filter" not in st.session_state:
+    st.session_state.nao_nav_motivo_filter = None
+
+if "nao_nav_med_resp_filter" not in st.session_state:
+    st.session_state.nao_nav_med_resp_filter = None
+
+if "naveg_hospital_filter" not in st.session_state:
+    st.session_state.naveg_hospital_filter = None
+
+if "naveg_convenio_filter" not in st.session_state:
+    st.session_state.naveg_convenio_filter = None
+
+def apply_naveg_filters(df: pd.DataFrame) -> pd.DataFrame:
+    filtered = df.copy()
+    hospital_filter = st.session_state.get("naveg_hospital_filter")
+    convenio_filter = st.session_state.get("naveg_convenio_filter")
+
+    if hospital_filter:
+        filtered = filtered[filtered["HOSPITAL"] == hospital_filter]
+
+    if convenio_filter:
+        filtered = filtered[filtered["CONVÊNIO"] == convenio_filter]
+
+    return filtered
+
+def enviado_recebido_hospital_df(df: pd.DataFrame) -> pd.DataFrame:
+    finance_cols = [
+        "TOTAL - PRODUZIDO",
+        "TOTAL - PENDENTE DE ENVIO",
+        "TOTAL - ENVIADO",
+        "TOTAL - RECEBIDO",
+        "TOTAL - VALOR A VENCER",
+        "TOTAL - VENCIDO",
+    ]
+    temp = df.copy()
+    for col in finance_cols:
+        temp[col] = pd.to_numeric(temp[col], errors="coerce").fillna(0)
+
+    rows = []
+    for hospital, hdf in temp.groupby("HOSPITAL", sort=True):
+        hrow = {"Hospital": hospital, "Convênio": "TOTAL DO HOSPITAL"}
+        for col in finance_cols:
+            hrow[col.replace("TOTAL - ", "").title()] = hdf[col].sum()
+        rows.append(hrow)
+
+        conv_group = (
+            hdf.groupby("CONVÊNIO")[finance_cols]
+            .sum()
+            .reset_index()
+            .sort_values("TOTAL - PRODUZIDO", ascending=False)
+        )
+        for _, r in conv_group.iterrows():
+            crow = {"Hospital": hospital, "Convênio": r["CONVÊNIO"]}
+            for col in finance_cols:
+                crow[col.replace("TOTAL - ", "").title()] = r[col]
+            rows.append(crow)
+
+    return pd.DataFrame(rows)
+
+def format_enviado_recebido_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in ["Produzido", "Pendente De Envio", "Enviado", "Recebido", "Valor A Vencer", "Vencido"]:
+        if col in out.columns:
+            out[col] = out[col].apply(lambda x: money(float(x)) if pd.notna(x) else "")
+    out = out.rename(columns={
+        "Pendente De Envio": "Pendente de Envio",
+        "Valor A Vencer": "Valor a Vencer",
+    })
+    return out
+
+def update_naveg_hospital_table_event(event, raw_df: pd.DataFrame):
+    try:
+        rows = event.selection.rows
+    except Exception:
+        rows = []
+
+    if rows:
+        selected = raw_df.iloc[rows[0]]
+        hospital = selected["Hospital"]
+        convenio = selected["Convênio"]
+
+        st.session_state.naveg_hospital_filter = hospital
+        st.session_state.naveg_convenio_filter = None if convenio == "TOTAL DO HOSPITAL" else convenio
+        st.rerun()
+
+def matrix_money(value) -> str:
+    try:
+        return money(float(value))
+    except Exception:
+        return ""
+
+def set_naveg_filter(hospital: str | None = None, convenio: str | None = None):
+    st.session_state.naveg_hospital_filter = hospital
+    st.session_state.naveg_convenio_filter = convenio
+    st.rerun()
+
+def render_enviado_recebido_matrix(df: pd.DataFrame):
+    raw = enviado_recebido_hospital_df(df)
+
+    value_cols = [
+        "Produzido",
+        "Pendente De Envio",
+        "Enviado",
+        "Recebido",
+        "Valor A Vencer",
+        "Vencido",
+    ]
+
+    st.markdown("<div class='table-card'><div class='table-title'>ENVIADO E RECEBIDO POR HOSPITAL</div></div>", unsafe_allow_html=True)
+
+    widths = [1.0, 2.15, 1.15, 1.45, 1.15, 1.15, 1.4, 1.15]
+    header = st.columns(widths)
+    header[0].markdown("**Hospital**")
+    header[1].markdown("**Convênio**")
+    header[2].markdown("**Produzido**")
+    header[3].markdown("**Pendente Envio**")
+    header[4].markdown("**Enviado**")
+    header[5].markdown("**Recebido**")
+    header[6].markdown("**Vl a Vencer**")
+    header[7].markdown("**Vencido**")
+    st.markdown("<hr style='margin: 2px 0 6px 0; border: 0; border-top: 1px solid #cfe0f2;'>", unsafe_allow_html=True)
+
+    for hospital in raw["Hospital"].drop_duplicates().tolist():
+        hkey = f"matrix_expanded_{hospital}"
+        if hkey not in st.session_state:
+            st.session_state[hkey] = True
+
+        hrow = raw[(raw["Hospital"] == hospital) & (raw["Convênio"] == "TOTAL DO HOSPITAL")].iloc[0]
+        expanded = st.session_state[hkey]
+        icon = "▾" if expanded else "▸"
+
+        cols = st.columns(widths)
+        with cols[0]:
+            if st.button(f"{icon} {hospital}", key=f"matrix_hospital_{hospital}", use_container_width=True):
+                st.session_state[hkey] = not st.session_state[hkey]
+                st.session_state.naveg_hospital_filter = hospital
+                st.session_state.naveg_convenio_filter = None
+                st.rerun()
+        cols[1].markdown("**TOTAL DO HOSPITAL**")
+        for i, col in enumerate(value_cols, start=2):
+            cols[i].markdown(f"**{matrix_money(hrow[col])}**")
+
+        if expanded:
+            conv_rows = raw[(raw["Hospital"] == hospital) & (raw["Convênio"] != "TOTAL DO HOSPITAL")].copy()
+            for _, r in conv_rows.iterrows():
+                conv = str(r["Convênio"])
+                ccols = st.columns(widths)
+                ccols[0].markdown("")
+                with ccols[1]:
+                    safe_key = re.sub(r"[^A-Za-z0-9_]+", "_", f"{hospital}_{conv}") or f"{hospital}_sem_convenio"
+                    if st.button(f"↳ {conv}", key=f"matrix_convenio_{safe_key}", use_container_width=True):
+                        st.session_state.naveg_hospital_filter = hospital
+                        st.session_state.naveg_convenio_filter = conv
+                        st.rerun()
+                for i, col in enumerate(value_cols, start=2):
+                    ccols[i].markdown(matrix_money(r[col]))
+
+        st.markdown("<hr style='margin: 2px 0 4px 0; border: 0; border-top: 1px solid #eef3f8;'>", unsafe_allow_html=True)
+
 def apply_busca_interactive_filters(df: pd.DataFrame) -> pd.DataFrame:
     filtered = df.copy()
 
@@ -1226,6 +1469,19 @@ def apply_busca_interactive_filters(df: pd.DataFrame) -> pd.DataFrame:
 
     return filtered
 
+def apply_nao_nav_filters(df: pd.DataFrame) -> pd.DataFrame:
+    filtered = df.copy()
+    motivo_filter = st.session_state.get("nao_nav_motivo_filter")
+    med_filter = st.session_state.get("nao_nav_med_resp_filter")
+
+    if motivo_filter:
+        filtered = filtered[filtered["MOTIVO"] == motivo_filter]
+
+    if med_filter is not None:
+        filtered = filtered[filtered["MÉD. RESP. ACOMP."].fillna("").astype(str) == med_filter]
+
+    return filtered
+
 def update_filter_from_status_event(event, status_summary: pd.DataFrame):
     try:
         rows = event.selection.rows
@@ -1236,11 +1492,9 @@ def update_filter_from_status_event(event, status_summary: pd.DataFrame):
         selected_status = str(status_summary.iloc[rows[0]]["Status"])
         if st.session_state.busca_status_filter != selected_status or st.session_state.busca_med_resp_filter is not None:
             st.session_state.busca_status_filter = selected_status
-            # Quando filtra pela tabela STATUS, limpa filtro de médico para evitar travar combinação anterior.
             st.session_state.busca_med_resp_filter = None
             st.rerun()
     else:
-        # Quando o usuário desmarca/limpa a seleção da tabela STATUS, volta a mostrar tudo.
         if st.session_state.busca_status_filter is not None and st.session_state.busca_med_resp_filter is None:
             st.session_state.busca_status_filter = None
             st.rerun()
@@ -1250,6 +1504,9 @@ def plot_status_by_med_resp(df: pd.DataFrame):
     temp["MÉD. RESP. ACOMP."] = temp["MÉD. RESP. ACOMP."].fillna("").astype(str).str.strip()
     temp.loc[temp["MÉD. RESP. ACOMP."] == "", "MÉD. RESP. ACOMP."] = "SEM MÉDICO RESP."
 
+    # A linha sem médico responsável deve conter apenas pacientes identificados e ainda sem 1ª consulta.
+    temp = temp[~((temp["MÉD. RESP. ACOMP."] == "SEM MÉDICO RESP.") & (temp["STATUS"] != STATUS_IDENTIFICADO))]
+
     order_medicos = ["SEM MÉDICO RESP."] + sorted([m for m in temp["MÉD. RESP. ACOMP."].unique().tolist() if m != "SEM MÉDICO RESP."])
     grouped = (
         temp.groupby(["MÉD. RESP. ACOMP.", "STATUS"])
@@ -1258,7 +1515,7 @@ def plot_status_by_med_resp(df: pd.DataFrame):
     )
 
     fig = go.Figure()
-    for status in ["Identificado", "1ª Consulta"]:
+    for status in STATUS_ORDER:
         vals = []
         for med in order_medicos:
             value = grouped[
@@ -1301,19 +1558,119 @@ def update_filter_from_chart_event(event):
         point = points[0]
         med = point.get("y")
         curve_number = point.get("curve_number", point.get("curveNumber", None))
-        status = "Identificado" if curve_number == 0 else "1ª Consulta"
+        status = STATUS_IDENTIFICADO if curve_number == 0 else STATUS_CONSULTA
 
         if st.session_state.busca_med_resp_filter != med or st.session_state.busca_status_filter != status:
             st.session_state.busca_med_resp_filter = med
             st.session_state.busca_status_filter = status
             st.rerun()
     else:
-        # Quando o usuário limpa/desmarca a seleção no gráfico, volta a mostrar tudo.
         if st.session_state.busca_med_resp_filter is not None:
             st.session_state.busca_med_resp_filter = None
             st.session_state.busca_status_filter = None
             st.rerun()
 
+def plot_motivos_nao_nav_bar(df: pd.DataFrame):
+    grouped = (
+        df.groupby("MOTIVO")
+        .size()
+        .reset_index(name="Nº Atend.")
+        .sort_values("Nº Atend.", ascending=False)
+    )
+    fig = go.Figure()
+    fig.add_bar(
+        x=grouped["Nº Atend."].tolist(),
+        y=grouped["MOTIVO"].tolist(),
+        orientation="h",
+        marker_color=ACCENT,
+        text=grouped["Nº Atend."].tolist(),
+        textposition="inside",
+        customdata=grouped["MOTIVO"].tolist(),
+    )
+    fig.update_layout(
+        height=max(300, 34 * len(grouped) + 90),
+        margin=dict(l=280, r=40, t=20, b=35),
+        paper_bgcolor="#fff",
+        plot_bgcolor="#fff",
+        clickmode="event+select",
+        yaxis=dict(autorange="reversed", tickfont=dict(color="#000000")),
+        xaxis=dict(gridcolor="#e7eef7", tickfont=dict(color="#000000")),
+        font=dict(color="#000000", size=11),
+        showlegend=False,
+    )
+    return fig
+
+
+def update_nao_nav_motivo_event(event, base_df: pd.DataFrame | None = None):
+    try:
+        points = event.selection.points
+    except Exception:
+        points = []
+
+    if points:
+        point = points[0]
+        motivo = (
+            point.get("customdata")
+            or point.get("y")
+            or point.get("label")
+            or point.get("legendgroup")
+        )
+
+        if not motivo and base_df is not None:
+            grouped = base_df.groupby("MOTIVO").size().reset_index(name="Nº Atend.").sort_values("Nº Atend.", ascending=False)
+            idx = point.get("point_number", point.get("pointNumber", None))
+            if idx is not None and int(idx) < len(grouped):
+                motivo = str(grouped.iloc[int(idx)]["MOTIVO"])
+
+        if motivo and st.session_state.nao_nav_motivo_filter != motivo:
+            st.session_state.nao_nav_motivo_filter = motivo
+            st.rerun()
+    else:
+        if st.session_state.nao_nav_motivo_filter is not None:
+            st.session_state.nao_nav_motivo_filter = None
+            st.rerun()
+
+def plot_nao_nav_por_med_resp(df: pd.DataFrame):
+    temp = df.copy()
+    temp["MÉD. RESP. ACOMP."] = temp["MÉD. RESP. ACOMP."].fillna("").astype(str).str.strip()
+    temp = temp[temp["MÉD. RESP. ACOMP."] != ""]
+    grouped = temp.groupby("MÉD. RESP. ACOMP.").size().reset_index(name="Nº Atend.").sort_values("Nº Atend.", ascending=False)
+
+    fig = go.Figure()
+    fig.add_bar(
+        x=grouped["Nº Atend."].tolist(),
+        y=grouped["MÉD. RESP. ACOMP."].tolist(),
+        orientation="h",
+        marker_color=ACCENT,
+        text=grouped["Nº Atend."].tolist(),
+        textposition="inside",
+    )
+    fig.update_layout(
+        height=max(275, 35 * len(grouped) + 80),
+        margin=dict(l=180, r=40, t=20, b=30),
+        paper_bgcolor="#fff",
+        plot_bgcolor="#fff",
+        yaxis=dict(autorange="reversed", tickfont=dict(color="#000000")),
+        xaxis=dict(gridcolor="#e7eef7", tickfont=dict(color="#000000")),
+        font=dict(color="#000000", size=11),
+    )
+    return fig
+
+def update_nao_nav_med_event(event):
+    try:
+        points = event.selection.points
+    except Exception:
+        points = []
+
+    if points:
+        med = points[0].get("y")
+        if st.session_state.nao_nav_med_resp_filter != med:
+            st.session_state.nao_nav_med_resp_filter = med
+            st.rerun()
+    else:
+        if st.session_state.nao_nav_med_resp_filter is not None:
+            st.session_state.nao_nav_med_resp_filter = None
+            st.rerun()
 
 # ============================================================
 # COMPONENTES VISUAIS
@@ -1560,7 +1917,7 @@ def table_html(df: pd.DataFrame, title: str, scroll=False):
             return break_long_text(str(val), width=115)
         if "%" in col and isinstance(val, (int, float)):
             return pct(val)
-        if "REC" in col or "TICKET" in col or col == "RECEITA":
+        if "REC" in col or "TICKET" in col or col == "RECEITA" or col.startswith("TOTAL -"):
             if isinstance(val, (int, float)):
                 return money(val)
         if isinstance(val, float):
@@ -1623,6 +1980,55 @@ def plot_area_monthly():
     return fig
 
 
+def plot_total_recebido_monthly(df: pd.DataFrame):
+    temp = df.copy()
+    date_col = "DATA CONSULTA/TRATAMENTO" if "DATA CONSULTA/TRATAMENTO" in temp.columns else "DATA IDENTIFICAÇÃO"
+    temp["_DATA_REF"] = pd.to_datetime(temp[date_col], dayfirst=True, errors="coerce")
+    temp["_VALOR_RECEBIDO"] = pd.to_numeric(temp["TOTAL - RECEBIDO"], errors="coerce").fillna(0)
+    temp = temp.dropna(subset=["_DATA_REF"])
+
+    month_map = {
+        1: "Jan", 2: "Fev", 3: "Mar", 4: "Abr", 5: "Mai", 6: "Jun",
+        7: "Jul", 8: "Ago", 9: "Set", 10: "Out", 11: "Nov", 12: "Dez"
+    }
+
+    grouped = (
+        temp.groupby(temp["_DATA_REF"].dt.month)["_VALOR_RECEBIDO"]
+        .sum()
+        .reset_index()
+        .rename(columns={"_DATA_REF": "MES_NUM", "_VALOR_RECEBIDO": "TOTAL_RECEBIDO"})
+        .sort_values("MES_NUM")
+    )
+
+    months = [month_map[int(m)] for m in grouped["MES_NUM"].tolist()]
+    values = grouped["TOTAL_RECEBIDO"].tolist()
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=months,
+            y=values,
+            mode="lines+markers+text",
+            fill="tozeroy",
+            line=dict(width=3, color=ACCENT),
+            marker=dict(size=8, color=ACCENT),
+            fillcolor="rgba(47,128,237,0.42)",
+            text=[money_card(v) for v in values],
+            textposition="top center",
+        )
+    )
+    fig.update_layout(
+        height=275,
+        margin=dict(l=30, r=20, t=20, b=30),
+        paper_bgcolor="#fff",
+        plot_bgcolor="#fff",
+        yaxis=dict(gridcolor="#e7eef7", tickfont=dict(color="#000000"), tickformat=".2s"),
+        xaxis=dict(gridcolor="#fff", tickfont=dict(color="#000000")),
+        font=dict(color="#000000", size=11),
+    )
+    return fig
+
+
 def plot_hbar(labels, values, left_margin: int = 150):
     fig = go.Figure()
     fig.add_bar(
@@ -1646,36 +2052,7 @@ def plot_hbar(labels, values, left_margin: int = 150):
 
 
 def plot_donut():
-    labels = [
-        "Sem cobertura de Convênio",
-        "Médico não quis encaminhar",
-        "Paciente já em acompanhamento externo",
-        "Tratamento iniciado fora da rede",
-        "Dados incompletos no atendimento",
-    ]
-    values = [42, 31, 28, 26, 22]
-    fig = go.Figure(
-        data=[
-            go.Pie(
-                labels=labels,
-                values=values,
-                hole=.55,
-                marker=dict(colors=[ACCENT, "#3b82f6", "#60a5fa", "#93c5fd", "#bfdbfe"]),
-                textinfo="percent+value",
-                textfont=dict(color="#000000"),
-            )
-        ]
-    )
-    fig.update_layout(
-        height=275,
-        margin=dict(l=10, r=10, t=10, b=10),
-        paper_bgcolor="#fff",
-        plot_bgcolor="#fff",
-        font=dict(color="#000000", size=11),
-        showlegend=True,
-        legend=dict(orientation="v", x=1.02, y=.5, font=dict(color="#000000")),
-    )
-    return fig
+    return plot_donut_nao_nav(nao_nav_df)
 
 
 def plot_donut_cid_top10():
@@ -1794,6 +2171,8 @@ def page_busca():
     total_pat = len(base_filtered[base_filtered["ÁREA"] == "Patologia"])
     total_rad = len(base_filtered[base_filtered["ÁREA"] == "Radiologia"])
     total_lab = len(base_filtered[base_filtered["ÁREA"] == "Laboratório"])
+    tempo_medio = pd.to_numeric(base_filtered["DIAS DESDE A IDENTIFICAÇÃO"], errors="coerce").mean()
+    tempo_medio_txt = "-" if pd.isna(tempo_medio) else f"{tempo_medio:.1f} dias".replace(".", ",")
 
     cols = st.columns(5)
     with cols[0]:
@@ -1805,17 +2184,17 @@ def page_busca():
     with cols[3]:
         metric_card("Nº Atend. Identificados - Laboratório", f"{total_lab:,}".replace(",", "."), f"{base_filtered[base_filtered['ÁREA'] == 'Laboratório']['PACIENTE'].nunique()} pacientes")
     with cols[4]:
-        metric_card("Tempo médio desde a identificação", "8,3 dias", "Média geral")
+        metric_card("Tempo médio desde a identificação", tempo_medio_txt, "Média com filtro")
 
-    status_identificados = len(base_filtered[base_filtered["STATUS"] == "Identificado"])
-    status_consulta = len(base_filtered[base_filtered["STATUS"] == "1ª Consulta"])
+    status_identificados = len(base_filtered[base_filtered["STATUS"] == STATUS_IDENTIFICADO])
+    status_consulta = len(base_filtered[base_filtered["STATUS"] == STATUS_CONSULTA])
     sem_medico = len(base_filtered[base_filtered["MÉD. RESP. ACOMP."].fillna("").astype(str).str.strip() == ""])
 
     cols = st.columns([1.3, 1, 1, 1, 1.3])
     with cols[1]:
-        metric_card("Nº Atend. - Identificados", f"{status_identificados:,}".replace(",", "."), "")
+        metric_card("Nº Atend. - Identificado e não 1ª Consulta", f"{status_identificados:,}".replace(",", "."), "")
     with cols[2]:
-        metric_card("Nº Atend. - 1ª Consulta", f"{status_consulta:,}".replace(",", "."), "")
+        metric_card("Nº Atend. - 1ª Consulta e não 1º Tratamento", f"{status_consulta:,}".replace(",", "."), "")
     with cols[3]:
         metric_card("Nº Atend. - Sem Médico Resp. Acompanhamento", f"{sem_medico:,}".replace(",", "."), "")
 
@@ -1825,7 +2204,7 @@ def page_busca():
         .reset_index()
         .rename(columns={"STATUS": "Status"})
     )
-    status_summary["Status"] = pd.Categorical(status_summary["Status"], ["Identificado", "1ª Consulta"], ordered=True)
+    status_summary["Status"] = pd.Categorical(status_summary["Status"], STATUS_ORDER, ordered=True)
     status_summary = status_summary.sort_values("Status").reset_index(drop=True)
 
     col_status, col_chart = st.columns([0.28, 0.72])
@@ -1871,6 +2250,53 @@ def page_busca():
             st.session_state.chart_selector_reset_counter = st.session_state.get("chart_selector_reset_counter", 0) + 1
             st.rerun()
 
+    col_motivo, col_med_nao_nav = st.columns([1.0, 1.0])
+    nao_nav_base = nao_nav_df.copy()
+    nao_nav_filtered = apply_nao_nav_filters(nao_nav_base)
+
+    with col_motivo:
+        st.markdown("<div class='viz-card'><div class='viz-title'>Motivos de Não Navegação</div>", unsafe_allow_html=True)
+        try:
+            motivo_event = st.plotly_chart(
+                plot_motivos_nao_nav_bar(nao_nav_base),
+                use_container_width=True,
+                config={"displayModeBar": False},
+                on_select="rerun",
+                selection_mode="points",
+                key=f"donut_motivo_nao_nav_busca_{st.session_state.get('nao_nav_motivo_reset_counter', 0)}",
+            )
+            update_nao_nav_motivo_event(motivo_event, nao_nav_base)
+        except TypeError:
+            st.plotly_chart(plot_motivos_nao_nav_bar(nao_nav_base), use_container_width=True, config={"displayModeBar": False})
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with col_med_nao_nav:
+        st.markdown("<div class='viz-card'><div class='viz-title'>Nº Atendimentos Não Navegados por Médico Resp. Acomp.</div>", unsafe_allow_html=True)
+        try:
+            med_event = st.plotly_chart(
+                plot_nao_nav_por_med_resp(nao_nav_base),
+                use_container_width=True,
+                config={"displayModeBar": False},
+                on_select="rerun",
+                selection_mode="points",
+                key=f"bar_med_nao_nav_busca_{st.session_state.get('nao_nav_med_reset_counter', 0)}",
+            )
+            update_nao_nav_med_event(med_event)
+        except TypeError:
+            st.plotly_chart(plot_nao_nav_por_med_resp(nao_nav_base), use_container_width=True, config={"displayModeBar": False})
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if st.session_state.nao_nav_motivo_filter or st.session_state.nao_nav_med_resp_filter:
+        st.caption(
+            f"Filtro não navegação aplicado: Motivo = {st.session_state.nao_nav_motivo_filter or 'Todos'} | Médico resp. = {st.session_state.nao_nav_med_resp_filter or 'Todos'}"
+        )
+        if st.button("Limpar filtros de não navegação", key="limpar_filtros_nao_nav_busca"):
+            st.session_state.nao_nav_motivo_filter = None
+            st.session_state.nao_nav_med_resp_filter = None
+            st.session_state.nao_nav_motivo_reset_counter = st.session_state.get("nao_nav_motivo_reset_counter", 0) + 1
+            st.session_state.nao_nav_med_reset_counter = st.session_state.get("nao_nav_med_reset_counter", 0) + 1
+            st.rerun()
+
     st.markdown("<div class='section-title'>Busca de Pacientes</div>", unsafe_allow_html=True)
 
     patologia_view = patologia_df.copy()
@@ -1900,6 +2326,10 @@ def page_busca():
     table_html(patologia_view, "PACIENTES IDENTIFICADOS - PATOLOGIA", scroll=True)
     table_html(radiologia_view, "PACIENTES IDENTIFICADOS - RADIOLOGIA", scroll=True)
     table_html(laboratorio_view, "PACIENTES IDENTIFICADOS - LABORATÓRIO", scroll=True)
+    table_html(naveg_df, "ANALÍTICO PACIENTES NAVEGADOS", scroll=True)
+
+    st.markdown("<div class='section-title'>Pacientes Não Navegados</div>", unsafe_allow_html=True)
+    table_html(nao_nav_filtered, "ANALÍTICO PACIENTES NÃO NAVEGADOS", scroll=True)
 
 
 def page_acomp():
@@ -1919,15 +2349,19 @@ def page_acomp():
         metric_card("Taxa Conv. - 1º Tratamento", "40,8%", "1º T. / identificados")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    cols = st.columns([0.8, 1, 1, 1, 1, 0.8])
+    cols = st.columns(6)
+    with cols[0]:
+        metric_card("Total - Produzido", money_card(sum_finance_col(naveg_df, "TOTAL - PRODUZIDO")), "")
     with cols[1]:
-        metric_card("Receita - Produzida", money_card(sum_finance_col(naveg_df, "RECEITA - PRODUZIDA")), "")
+        metric_card("Total - Enviado", money_card(sum_finance_col(naveg_df, "TOTAL - ENVIADO")), "")
     with cols[2]:
-        metric_card("Receita - Enviada", money_card(sum_finance_col(naveg_df, "RECEITA - ENVIADA")), "")
+        metric_card("Total - Pendente de Envio", money_card(sum_finance_col(naveg_df, "TOTAL - PENDENTE DE ENVIO")), "")
     with cols[3]:
-        metric_card("Receita - Recebida", money_card(sum_finance_col(naveg_df, "RECEITA - RECEBIDA")), "")
+        metric_card("Total - Recebido", money_card(sum_finance_col(naveg_df, "TOTAL - RECEBIDO")), "")
     with cols[4]:
-        metric_card("Total Glosado", money_card(sum_finance_col(naveg_df, "TOTAL GLOSADO")), "")
+        metric_card("Total - Valor a Vencer", money_card(sum_finance_col(naveg_df, "TOTAL - VALOR A VENCER")), "")
+    with cols[5]:
+        metric_card("Total - Vencido", money_card(sum_finance_col(naveg_df, "TOTAL - VENCIDO")), "")
 
     st.markdown('<div class="acomp-time-row">', unsafe_allow_html=True)
     cols = st.columns([1.2, 1, 1, 1.2])
@@ -1947,17 +2381,30 @@ def page_acomp():
         mini_origin_block("Laboratório", "687", "63,2%", "39,4%")
     st.markdown('</div>', unsafe_allow_html=True)
 
+    st.markdown("<div class='section-title'>Enviado e Recebido por Hospital</div>", unsafe_allow_html=True)
+    render_enviado_recebido_matrix(naveg_df)
+
+    if st.session_state.naveg_hospital_filter or st.session_state.naveg_convenio_filter:
+        st.caption(
+            f"Filtro navegação aplicado: Hospital = {st.session_state.naveg_hospital_filter or 'Todos'} | Convênio = {st.session_state.naveg_convenio_filter or 'Todos'}"
+        )
+        if st.button("Limpar filtro Enviado e Recebido", key="limpar_filtro_enviado_recebido"):
+            st.session_state.naveg_hospital_filter = None
+            st.session_state.naveg_convenio_filter = None
+            st.rerun()
+
     st.markdown("<div class='section-title'>Gráficos Gerais</div>", unsafe_allow_html=True)
 
     col1, col2 = st.columns([1.25, .75])
     with col1:
-        viz_container("Receita Total Mensal", plot_area_monthly())
+        viz_container("Total Produzido por Mês", plot_area_monthly())
+        viz_container("Total Recebido por Mês", plot_total_recebido_monthly(naveg_df))
     with col2:
         viz_container("Receita por Área", plot_donut_area_receita())
 
     col1, col2 = st.columns([1.0, 1.0])
     with col1:
-        conv_sorted = receita_conv_df.sort_values("REC. TOTAL", ascending=True)
+        conv_sorted = receita_conv_df.sort_values("REC. TOTAL", ascending=False)
         viz_container_scroll(
             "Receita por Convênio",
             plot_hbar(conv_sorted["CONVÊNIO"].tolist(), conv_sorted["REC. TOTAL"].tolist()),
@@ -1965,7 +2412,7 @@ def page_acomp():
             width_px=980,
         )
     with col2:
-        med_sorted = receita_med_df.sort_values("REC. TOTAL", ascending=True)
+        med_sorted = receita_med_df.sort_values("REC. TOTAL", ascending=False)
         viz_container_scroll(
             "Receita por Médico Oncologista/Hematologista",
             plot_hbar(med_sorted["MÉDICO"].tolist(), med_sorted["REC. TOTAL"].tolist()),
@@ -1975,7 +2422,7 @@ def page_acomp():
 
     col1, col2 = st.columns([1.0, 1.0])
     with col1:
-        cid_sorted = receita_cid_df.sort_values("REC. TOTAL", ascending=True)
+        cid_sorted = receita_cid_df.sort_values("REC. TOTAL", ascending=False)
         viz_container_scroll(
             "Receita por CID",
             plot_hbar(
@@ -1988,9 +2435,6 @@ def page_acomp():
         )
     with col2:
         viz_container("Top 10 CID - 1º Tratamento", plot_donut_cid_top10())
-
-    with st.container():
-        viz_container("Motivos de Não Navegação", plot_donut())
 
     st.markdown("<div class='section-title'>Tabelas Gerenciais e Analíticas</div>", unsafe_allow_html=True)
 
@@ -2006,8 +2450,8 @@ def page_acomp():
     with c3:
         table_html(receita_cid_view, "Receita por CID", scroll=True)
 
-    table_html(nao_nav_df, "Analítico Pacientes Não Navegados", scroll=True)
-    table_html(naveg_df, "Analítico Pacientes Navegados", scroll=True)
+    naveg_analitico_view = apply_naveg_filters(naveg_df)
+    table_html(naveg_analitico_view, "Analítico Pacientes Navegados", scroll=True)
 
 # ============================================================
 # EXECUÇÃO
@@ -2020,3 +2464,4 @@ else:
     page_acomp()
 
 bottom_nav()
+
