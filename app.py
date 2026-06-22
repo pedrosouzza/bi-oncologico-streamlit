@@ -2325,7 +2325,6 @@ def page_busca():
     table_html(patologia_view, "PACIENTES IDENTIFICADOS - PATOLOGIA", scroll=True)
     table_html(radiologia_view, "PACIENTES IDENTIFICADOS - RADIOLOGIA", scroll=True)
     table_html(laboratorio_view, "PACIENTES IDENTIFICADOS - LABORATÓRIO", scroll=True)
-    table_html(naveg_df, "ANALÍTICO PACIENTES NAVEGADOS", scroll=True)
 
 
 def page_acomp():
@@ -2460,4 +2459,5 @@ else:
     page_acomp()
 
 bottom_nav()
+
 
